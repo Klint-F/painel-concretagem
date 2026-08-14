@@ -6,9 +6,9 @@ primary_region = 'gru'
 [env]
   PORT = '8080'
 
-[[mounts]]
-  source = 'concretagem_data'
-  destination = '/app/dados'
+[mounts]
+  source = "concretagem_data"
+  destination = "/app/dados"
 
 [http_service]
   internal_port = 8080

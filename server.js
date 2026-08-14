@@ -1,12 +1,14 @@
 /* =====================================================================
-   Painel de Concretagem — servidor com PostgreSQL (Supabase/Render)
-   Força IPv4 para evitar ENETUNREACH no Render free tier
+   Painel de Concretagem FAMA — servidor com autenticação, auditoria,
+   funcionários, compressão gzip e cache. Fly.io + volume persistente.
    ===================================================================== */
 const http = require('http');
 const fs   = require('fs');
 const path = require('path');
 const os   = require('os');
 const url  = require('url');
+const zlib = require('zlib');
+const crypto = require('crypto');
 
 const PORTA   = Number(process.argv[2]) || 8080;
 const RAIZ    = __dirname;
@@ -16,11 +18,74 @@ const BANCO   = path.join(DADOS, 'banco.json');
 const BACKUPS = path.join(DADOS, 'backups');
 const PLANTAS = path.join(DADOS, 'plantas');
 const FOTOS   = path.join(DADOS, 'fotos');
+const AUDIT   = path.join(DADOS, 'auditoria.jsonl');
 
 for (const d of [DADOS, BACKUPS, PLANTAS, FOTOS]) fs.mkdirSync(d, { recursive: true });
 
 /* =====================================================================
-   MODO:  'pg'  = PostgreSQL online  |  'json' = arquivo local
+   AUTENTICAÇÃO
+   ===================================================================== */
+const CREDENCIAIS = { login: 'Sunset', senha: 'fama' };
+const SESSOES = new Map(); // token -> {login, criado}
+const SESSAO_DURACAO = 8 * 60 * 60 * 1000; // 8 horas
+
+function hashSenha(senha) {
+  return crypto.createHash('sha256').update(senha + 'fama-salt-2024').digest('hex');
+}
+
+function novaSessao() {
+  const token = crypto.randomBytes(32).toString('hex');
+  SESSOES.set(token, { login: CREDENCIAIS.login, criado: Date.now() });
+  limparSessoes();
+  return token;
+}
+
+function limparSessoes() {
+  const agora = Date.now();
+  for (const [token, sess] of SESSOES) {
+    if (agora - sess.criado > SESSAO_DURACAO) SESSOES.delete(token);
+  }
+}
+
+function authOk(req) {
+  const cookie = req.headers.cookie || '';
+  const m = cookie.match(/fama_token=([^;]+)/);
+  if (!m) return false;
+  const sess = SESSOES.get(m[1]);
+  if (!sess) return false;
+  if (Date.now() - sess.criado > SESSAO_DURACAO) { SESSOES.delete(m[1]); return false; }
+  return true;
+}
+
+function setAuthCookie(res, token) {
+  res.setHeader('Set-Cookie', `fama_token=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${SESSAO_DURACAO/1000}`);
+}
+
+function clearAuthCookie(res) {
+  res.setHeader('Set-Cookie', `fama_token=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`);
+}
+
+/* =====================================================================
+   AUDITORIA
+   ===================================================================== */
+function auditar(acao, detalhe, req) {
+  const linha = JSON.stringify({
+    t: new Date().toISOString(),
+    acao,
+    detalhe,
+    ip: req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '-'
+  }) + '\n';
+  try { fs.appendFileSync(AUDIT, linha); } catch (e) {}
+}
+
+function lerAuditoria(limite = 200) {
+  if (!fs.existsSync(AUDIT)) return [];
+  const linhas = fs.readFileSync(AUDIT, 'utf8').trim().split('\n').filter(Boolean);
+  return linhas.slice(-limite).map(l => { try { return JSON.parse(l); } catch (e) { return null; } }).filter(Boolean).reverse();
+}
+
+/* =====================================================================
+   MODO BANCO: 'pg' = PostgreSQL online | 'json' = arquivo local
    ===================================================================== */
 const MODO_PG = !!process.env.DATABASE_URL;
 let pool = null;
@@ -30,31 +95,21 @@ if (MODO_PG) {
   const dbUrl = url.parse(process.env.DATABASE_URL);
   const auth = (dbUrl.auth || '').split(':');
   pool = new Pool({
-    host: dbUrl.hostname,
-    port: dbUrl.port || 5432,
-    user: auth[0],
-    password: auth[1] || '',
+    host: dbUrl.hostname, port: dbUrl.port || 5432, user: auth[0], password: auth[1] || '',
     database: dbUrl.pathname ? dbUrl.pathname.replace(/^\//, '') : '',
-    ssl: { rejectUnauthorized: false },
-    family: 4,
-    connectionTimeoutMillis: 10000
+    ssl: { rejectUnauthorized: false }, family: 4, connectionTimeoutMillis: 10000
   });
 }
 
 /* ------------------------- banco de dados ------------------------- */
 const VAZIO = { rev: 0, atualizado: null, pours: {}, planta: null, ajustes: {},
-                metas: {}, plano: null, equipes: [], alocacoes: [] };
+                metas: {}, plano: null, equipes: [], alocacoes: [], funcionarios: [] };
 
 let ESTADO = Object.assign({}, VAZIO);
 
-/* --- local (JSON) --- */
 function lerLocal() {
-  try {
-    const j = JSON.parse(fs.readFileSync(BANCO, 'utf8'));
-    return Object.assign({}, VAZIO, j);
-  } catch (e) {
-    return Object.assign({}, VAZIO);
-  }
+  try { const j = JSON.parse(fs.readFileSync(BANCO, 'utf8')); return Object.assign({}, VAZIO, j); }
+  catch (e) { return Object.assign({}, VAZIO); }
 }
 
 function gravarLocal(estado) {
@@ -76,10 +131,9 @@ function backupLocal(estado) {
     fs.writeFileSync(path.join(BACKUPS, nome), JSON.stringify(estado), 'utf8');
     const antigos = fs.readdirSync(BACKUPS).filter(f => f.endsWith('.json')).sort();
     while (antigos.length > 60) fs.unlinkSync(path.join(BACKUPS, antigos.shift()));
-  } catch (e) { /* backup nunca derruba o servidor */ }
+  } catch (e) {}
 }
 
-/* --- PostgreSQL --- */
 async function initPG() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS painel_estado (
@@ -92,13 +146,11 @@ async function initPG() {
       metas JSONB DEFAULT '{}',
       plano JSONB,
       equipes JSONB DEFAULT '[]',
-      alocacoes JSONB DEFAULT '[]'
+      alocacoes JSONB DEFAULT '[]',
+      funcionarios JSONB DEFAULT '[]'
     )
   `);
-  await pool.query(`
-    INSERT INTO painel_estado (id) VALUES (1)
-    ON CONFLICT (id) DO NOTHING
-  `);
+  await pool.query(`INSERT INTO painel_estado (id) VALUES (1) ON CONFLICT (id) DO NOTHING`);
 }
 
 async function lerPG() {
@@ -106,61 +158,33 @@ async function lerPG() {
   if (res.rows.length === 0) return Object.assign({}, VAZIO);
   const row = res.rows[0];
   return {
-    rev: row.rev || 0,
-    atualizado: row.atualizado,
-    pours: row.pours || {},
-    planta: row.planta,
-    ajustes: row.ajustes || {},
-    metas: row.metas || {},
-    plano: row.plano,
-    equipes: row.equipes || [],
-    alocacoes: row.alocacoes || []
+    rev: row.rev || 0, atualizado: row.atualizado,
+    pours: row.pours || {}, planta: row.planta, ajustes: row.ajustes || {},
+    metas: row.metas || {}, plano: row.plano, equipes: row.equipes || [],
+    alocacoes: row.alocacoes || [], funcionarios: row.funcionarios || []
   };
 }
 
 async function gravarPG(estado) {
-  await pool.query(`
-    UPDATE painel_estado SET
-      rev = $1,
-      atualizado = $2,
-      pours = $3,
-      planta = $4,
-      ajustes = $5,
-      metas = $6,
-      plano = $7,
-      equipes = $8,
-      alocacoes = $9
-    WHERE id = 1
-  `, [
-    estado.rev,
-    estado.atualizado,
-    JSON.stringify(estado.pours),
+  await pool.query(`UPDATE painel_estado SET rev=$1, atualizado=$2, pours=$3, planta=$4, ajustes=$5, metas=$6, plano=$7, equipes=$8, alocacoes=$9, funcionarios=$10 WHERE id=1`, [
+    estado.rev, estado.atualizado, JSON.stringify(estado.pours),
     estado.planta ? JSON.stringify(estado.planta) : null,
-    JSON.stringify(estado.ajustes),
-    JSON.stringify(estado.metas),
+    JSON.stringify(estado.ajustes), JSON.stringify(estado.metas),
     estado.plano ? JSON.stringify(estado.plano) : null,
-    JSON.stringify(estado.equipes),
-    JSON.stringify(estado.alocacoes)
+    JSON.stringify(estado.equipes), JSON.stringify(estado.alocacoes),
+    JSON.stringify(estado.funcionarios || [])
   ]);
   return estado;
 }
 
-/* --- unificado --- */
 async function carregar() {
-  if (MODO_PG) {
-    ESTADO = await lerPG();
-  } else {
-    ESTADO = lerLocal();
-    if (!fs.existsSync(BANCO)) gravarLocal(ESTADO);
-  }
+  if (MODO_PG) ESTADO = await lerPG();
+  else { ESTADO = lerLocal(); if (!fs.existsSync(BANCO)) gravarLocal(ESTADO); }
 }
 
 async function salvar(estado) {
-  if (MODO_PG) {
-    await gravarPG(estado);
-  } else {
-    gravarLocal(estado);
-  }
+  if (MODO_PG) await gravarPG(estado);
+  else gravarLocal(estado);
   ESTADO = estado;
 }
 
@@ -182,68 +206,128 @@ function json(res, code, obj) {
 function corpo(req, limiteMB = 60) {
   return new Promise((ok, falha) => {
     const partes = []; let tam = 0;
-    req.on('data', c => {
-      tam += c.length;
-      if (tam > limiteMB * 1024 * 1024) { falha(new Error('arquivo grande demais')); req.destroy(); return; }
-      partes.push(c);
-    });
+    req.on('data', c => { tam += c.length; if (tam > limiteMB * 1024 * 1024) { falha(new Error('arquivo grande demais')); req.destroy(); return; } partes.push(c); });
     req.on('end', () => ok(Buffer.concat(partes)));
     req.on('error', falha);
   });
 }
 
+function gzipSePossivel(res, buf, tipo) {
+  const aceita = (res.req.headers['accept-encoding'] || '').includes('gzip');
+  if (!aceita || buf.length < 1024) {
+    res.writeHead(200, { 'Content-Type': tipo, 'Content-Length': buf.length, 'Cache-Control': 'no-cache' });
+    res.end(buf);
+    return;
+  }
+  zlib.gzip(buf, (err, zipped) => {
+    if (err) {
+      res.writeHead(200, { 'Content-Type': tipo, 'Content-Length': buf.length, 'Cache-Control': 'no-cache' });
+      res.end(buf); return;
+    }
+    res.writeHead(200, { 'Content-Type': tipo, 'Content-Encoding': 'gzip', 'Content-Length': zipped.length, 'Cache-Control': 'no-cache' });
+    res.end(zipped);
+  });
+}
+
 /* ------------------------- servidor ------------------------- */
 const servidor = http.createServer(async (req, res) => {
-  const url = new URL(req.url, 'http://' + (req.headers.host || 'local'));
-  const rota = decodeURIComponent(url.pathname);
+  const urlObj = new URL(req.url, 'http://' + (req.headers.host || 'local'));
+  const rota = decodeURIComponent(urlObj.pathname);
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
 
   try {
-    /* --- estado completo --- */
-    if (rota === '/api/estado' && req.method === 'GET') return json(res, 200, ESTADO);
+    /* --- LOGIN --- */
+    if (rota === '/api/login' && req.method === 'POST') {
+      const body = JSON.parse((await corpo(req)).toString('utf8'));
+      if (body.login === CREDENCIAIS.login && hashSenha(body.senha) === hashSenha(CREDENCIAIS.senha)) {
+        const token = novaSessao();
+        setAuthCookie(res, token);
+        auditar('login', 'sucesso', req);
+        return json(res, 200, { ok: true, token });
+      }
+      auditar('login', 'falha: ' + body.login, req);
+      return json(res, 401, { ok: false, erro: 'Credenciais inválidas' });
+    }
+
+    if (rota === '/api/logout' && req.method === 'POST') {
+      const cookie = req.headers.cookie || '';
+      const m = cookie.match(/fama_token=([^;]+)/);
+      if (m) SESSOES.delete(m[1]);
+      clearAuthCookie(res);
+      auditar('logout', 'ok', req);
+      return json(res, 200, { ok: true });
+    }
+
+    if (rota === '/api/quem' && req.method === 'GET') {
+      return json(res, 200, { autenticado: authOk(req), login: authOk(req) ? CREDENCIAIS.login : null });
+    }
+
+    /* --- AUDITORIA (só leitura, protegida) --- */
+    if (rota === '/api/auditoria' && req.method === 'GET') {
+      if (!authOk(req)) return json(res, 401, { erro: 'Não autenticado' });
+      const limite = parseInt(urlObj.searchParams.get('limite') || '200', 10);
+      return json(res, 200, { ok: true, logs: lerAuditoria(limite) });
+    }
+
+    /* --- FUNCIONÁRIOS --- */
+    if (rota === '/api/funcionarios' && req.method === 'GET') {
+      if (!authOk(req)) return json(res, 401, { erro: 'Não autenticado' });
+      return json(res, 200, { ok: true, funcionarios: ESTADO.funcionarios || [] });
+    }
+
+    if (rota === '/api/funcionarios' && req.method === 'PUT') {
+      if (!authOk(req)) return json(res, 401, { erro: 'Não autenticado' });
+      const body = JSON.parse((await corpo(req)).toString('utf8'));
+      const estado = { ...ESTADO, funcionarios: body.funcionarios || [], rev: (ESTADO.rev || 0) + 1, atualizado: new Date().toISOString() };
+      await salvar(estado);
+      auditar('funcionarios', 'atualizado ' + (body.funcionarios || []).length + ' registros', req);
+      return json(res, 200, { ok: true, rev: estado.rev });
+    }
+
+    /* --- ESTADO (leitura pública, escrita protegida) --- */
+    if (rota === '/api/estado' && req.method === 'GET') {
+      return json(res, 200, ESTADO);
+    }
 
     if (rota === '/api/estado' && req.method === 'PUT') {
+      if (!authOk(req)) return json(res, 401, { erro: 'Não autenticado' });
       const novo = JSON.parse((await corpo(req)).toString('utf8'));
       const estado = {
-        rev: (ESTADO.rev || 0) + 1,
-        atualizado: new Date().toISOString(),
-        pours: novo.pours || {},
-        planta: novo.planta !== undefined ? novo.planta : ESTADO.planta,
-        ajustes: novo.ajustes || {},
-        metas: novo.metas || {},
+        rev: (ESTADO.rev || 0) + 1, atualizado: new Date().toISOString(),
+        pours: novo.pours || {}, planta: novo.planta !== undefined ? novo.planta : ESTADO.planta,
+        ajustes: novo.ajustes || {}, metas: novo.metas || {},
         plano: novo.plano !== undefined ? novo.plano : ESTADO.plano,
-        equipes: novo.equipes || [],
-        alocacoes: novo.alocacoes || []
+        equipes: novo.equipes || [], alocacoes: novo.alocacoes || [],
+        funcionarios: novo.funcionarios !== undefined ? novo.funcionarios : (ESTADO.funcionarios || [])
       };
       await salvar(estado);
+      auditar('estado', 'salvo rev ' + estado.rev, req);
       return json(res, 200, { ok: true, rev: estado.rev, atualizado: estado.atualizado });
     }
 
-    /* --- ping de sincronismo: a TV pergunta só a revisão --- */
     if (rota === '/api/rev') return json(res, 200, { rev: ESTADO.rev, atualizado: ESTADO.atualizado });
 
-    /* --- upload da planta baixa --- */
+    /* --- PLANTA (escrita protegida) --- */
     if (rota === '/api/planta' && req.method === 'POST') {
-      const ext = (url.searchParams.get('ext') || 'png').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 5);
+      if (!authOk(req)) return json(res, 401, { erro: 'Não autenticado' });
+      const ext = (urlObj.searchParams.get('ext') || 'png').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 5);
       const buf = await corpo(req);
       const arquivo = 'planta-' + Date.now() + '.' + ext;
       fs.writeFileSync(path.join(PLANTAS, arquivo), buf);
-      const estado = {
-        ...ESTADO,
-        planta: { arquivo, tipo: MIME['.' + ext] || 'application/octet-stream', bytes: buf.length },
-        rev: (ESTADO.rev || 0) + 1,
-        atualizado: new Date().toISOString()
-      };
+      const estado = { ...ESTADO, planta: { arquivo, tipo: MIME['.' + ext] || 'application/octet-stream', bytes: buf.length }, rev: (ESTADO.rev || 0) + 1, atualizado: new Date().toISOString() };
       await salvar(estado);
+      auditar('planta', 'upload ' + arquivo, req);
       return json(res, 200, { ok: true, url: '/planta/' + arquivo, rev: estado.rev });
     }
 
     if (rota === '/api/planta' && req.method === 'DELETE') {
-      const estado = { ...ESTADO, planta: null, rev: (ESTADO.rev || 0) + 1 };
+      if (!authOk(req)) return json(res, 401, { erro: 'Não autenticado' });
+      const estado = { ...ESTADO, planta: null, rev: (ESTADO.rev || 0) + 1, atualizado: new Date().toISOString() };
       await salvar(estado);
+      auditar('planta', 'removida', req);
       return json(res, 200, { ok: true, rev: estado.rev });
     }
 
@@ -252,39 +336,47 @@ const servidor = http.createServer(async (req, res) => {
       const arq = path.join(PLANTAS, nome);
       if (!fs.existsSync(arq)) { res.writeHead(404); return res.end('planta não encontrada'); }
       const ext = path.extname(nome).toLowerCase();
-      res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream', 'Cache-Control': 'max-age=3600' });
+      res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream', 'Cache-Control': 'public, max-age=3600', 'ETag': '"' + fs.statSync(arq).mtimeMs + '"' });
       return fs.createReadStream(arq).pipe(res);
     }
 
-    /* --- fotos do checklist e dos ensaios --- */
+    /* --- FOTOS (escrita protegida) --- */
     if (rota === '/api/foto' && req.method === 'POST') {
-      const ext = (url.searchParams.get('ext') || 'jpg').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 5);
+      if (!authOk(req)) return json(res, 401, { erro: 'Não autenticado' });
+      const ext = (urlObj.searchParams.get('ext') || 'jpg').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 5);
       const buf = await corpo(req);
       const arquivo = 'f' + Date.now() + '-' + Math.random().toString(36).slice(2, 7) + '.' + ext;
       fs.writeFileSync(path.join(FOTOS, arquivo), buf);
+      auditar('foto', 'upload ' + arquivo, req);
       return json(res, 200, { ok: true, url: '/fotos/' + arquivo });
     }
 
     if (rota.startsWith('/fotos/')) {
       const arq = path.join(FOTOS, path.basename(rota));
       if (!fs.existsSync(arq)) { res.writeHead(404); return res.end('foto não encontrada'); }
-      res.writeHead(200, { 'Content-Type': MIME[path.extname(arq).toLowerCase()] || 'application/octet-stream', 'Cache-Control': 'max-age=86400' });
+      res.writeHead(200, { 'Content-Type': MIME[path.extname(arq).toLowerCase()] || 'application/octet-stream', 'Cache-Control': 'public, max-age=86400', 'ETag': '"' + fs.statSync(arq).mtimeMs + '"' });
       return fs.createReadStream(arq).pipe(res);
     }
 
-    /* --- backup manual pela interface --- */
+    /* --- BACKUP --- */
     if (rota === '/api/backup' && req.method === 'POST') {
+      if (!authOk(req)) return json(res, 401, { erro: 'Não autenticado' });
       if (!MODO_PG) { ultimoBackup = 0; backupLocal(ESTADO); }
+      auditar('backup', 'manual', req);
       return json(res, 200, { ok: true, modo: MODO_PG ? 'pg' : 'local' });
     }
 
-    /* --- estáticos --- */
+    /* --- ESTÁTICOS COM GZIP --- */
     let alvo = rota === '/' ? '/index.html' : rota;
     const arquivo = path.join(PUBLICO, path.normalize(alvo).replace(/^([/\\])+/, ''));
     if (!arquivo.startsWith(PUBLICO)) { res.writeHead(403); return res.end('acesso negado'); }
     if (fs.existsSync(arquivo) && fs.statSync(arquivo).isFile()) {
-      res.writeHead(200, { 'Content-Type': MIME[path.extname(arquivo).toLowerCase()] || 'text/plain; charset=utf-8' });
-      return fs.createReadStream(arquivo).pipe(res);
+      const ext = path.extname(arquivo).toLowerCase();
+      const tipo = MIME[ext] || 'text/plain; charset=utf-8';
+      const buf = fs.readFileSync(arquivo);
+      const cache = (ext === '.html' || ext === '.js') ? 'public, max-age=60' : 'public, max-age=3600';
+      gzipSePossivel(res, buf, tipo);
+      return;
     }
     res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('404 — não encontrado');
@@ -298,56 +390,41 @@ function ips() {
   const lista = [];
   const nets = os.networkInterfaces();
   for (const nome of Object.keys(nets)) {
-    for (const n of nets[nome] || []) {
-      if (n.family === 'IPv4' && !n.internal) lista.push(n.address);
-    }
+    for (const n of nets[nome] || []) { if (n.family === 'IPv4' && !n.internal) lista.push(n.address); }
   }
   return lista;
 }
 
 async function iniciar() {
-  if (MODO_PG) {
-    await initPG();
-    await carregar();
-  } else {
-    await carregar();
-  }
+  if (MODO_PG) { await initPG(); await carregar(); }
+  else { await carregar(); }
 
   servidor.listen(PORTA, '0.0.0.0', () => {
     const linha = '─'.repeat(56);
     console.log('\n' + linha);
-    console.log('  PAINEL DE CONCRETAGEM — servidor no ar');
+    console.log('  PAINEL DE CONCRETAGEM FAMA — servidor no ar');
     console.log(linha);
     console.log('  Modo banco:         ' + (MODO_PG ? 'PostgreSQL (online)' : 'JSON local'));
     console.log('  Neste computador:   http://localhost:' + PORTA);
     ips().forEach(ip => console.log('  Na TV / celular:    http://' + ip + ':' + PORTA));
     console.log('  Modo TV direto:     http://' + (ips()[0] || 'localhost') + ':' + PORTA + '/?tv=1');
     console.log(linha);
-    if (!MODO_PG) {
-      console.log('  Banco:    ' + BANCO);
-      console.log('  Backups:  ' + BACKUPS);
-    }
+    if (!MODO_PG) { console.log('  Banco:    ' + BANCO); console.log('  Backups:  ' + BACKUPS); }
     console.log('  Registros salvos: ' + Object.keys(ESTADO.pours).length + '  ·  revisão ' + ESTADO.rev);
+    console.log('  Funcionários:     ' + (ESTADO.funcionarios || []).length);
     console.log(linha);
     console.log('  Para parar o servidor: Ctrl + C\n');
   });
 }
 
 servidor.on('error', e => {
-  if (e.code === 'EADDRINUSE') {
-    console.error('\n  A porta ' + PORTA + ' já está em uso.');
-    console.error('  Rode em outra porta:  node server.js 8081\n');
-  } else console.error(e);
+  if (e.code === 'EADDRINUSE') { console.error('\n  A porta ' + PORTA + ' já está em uso.\n  Rode em outra porta:  node server.js 8081\n'); }
+  else console.error(e);
   process.exit(1);
 });
 
-/* grava antes de encerrar */
 for (const sinal of ['SIGINT', 'SIGTERM']) {
-  process.on(sinal, async () => {
-    if (MODO_PG && pool) await pool.end();
-    console.log('\n  Servidor encerrado.\n');
-    process.exit(0);
-  });
+  process.on(sinal, async () => { if (MODO_PG && pool) await pool.end(); console.log('\n  Servidor encerrado.\n'); process.exit(0); });
 }
 
 iniciar();
