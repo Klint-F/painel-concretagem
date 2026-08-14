@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Painel de Concretagem — Parede de Concreto</title>
+<style>
+:root{
+  --bg:#0a0e18; --bg2:#101728; --panel:#141d33; --panel2:#1a2440;
+  --line:rgba(140,170,255,.14); --line2:rgba(140,170,255,.28);
+  --txt:#e6edff; --txt2:#93a4c9; --txt3:#6a7b9e;
+  --acc:#ffb020; --acc2:#38d6c4;
+  --st-pend:#4a5674; --st-prog:#8b7cf6; --st-cura:#ff7a45;
+  --st-esc:#ffb020; --st-ree:#38b6ff; --st-liv:#3ddc84; --danger:#ff5470;
+  --mono:'JetBrains Mono',ui-monospace,'DejaVu Sans Mono',Menlo,Consolas,monospace;
+  --sans:'Archivo','Segoe UI',system-ui,-apple-system,sans-serif;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  background:
+    radial-gradient(1200px 600px at 15% -10%, rgba(255,176,32,.10), transparent 60%),
+    radial-gradient(1000px 700px at 90% 0%, rgba(56,182,255,.10), transparent 55%),
+    var(--bg);
+  color:var(--txt);font-family:var(--sans);font-size:14px;line-height:1.45;
+  -webkit-font-smoothing:antialiased;padding:0 0 60px;
+}
+.wrap{max-width:1500px;margin:0 auto;padding:20px}
+
+header.top{display:flex;flex-wrap:wrap;gap:18px;align-items:flex-end;justify-content:space-between;
+  padding:18px 20px;border:1px solid var(--line);border-radius:16px;
+  background:linear-gradient(160deg,var(--panel),rgba(20,29,51,.55));
+  box-shadow:0 24px 60px -34px rgba(255,176,32,.55), inset 0 1px 0 rgba(255,255,255,.04)}
+.brand{display:flex;gap:14px;align-items:center}
+.mk{width:44px;height:44px;border-radius:12px;display:grid;place-items:center;
+  background:linear-gradient(145deg,rgba(255,176,32,.22),rgba(56,214,196,.10));border:1px solid var(--line2)}
+h1{font-size:19px;margin:0;letter-spacing:.2px;font-weight:700}
+.sub{color:var(--txt2);font-size:12.5px;margin-top:2px}
+.kpis{display:flex;gap:10px;flex-wrap:wrap}
+.kpi{background:var(--bg2);border:1px solid var(--line);border-radius:12px;padding:9px 14px;min-width:104px}
+.kpi b{display:block;font-family:var(--mono);font-size:17px;color:var(--acc)}
+.kpi span{font-size:10.5px;color:var(--txt3);text-transform:uppercase;letter-spacing:.9px}
+
+.sync{display:inline-flex;align-items:center;gap:7px;font-size:11.5px;font-family:var(--mono);
+  padding:5px 11px;border-radius:99px;border:1px solid var(--line2);background:var(--bg2);color:var(--txt2)}
+.sync i{width:8px;height:8px;border-radius:99px;background:var(--st-liv);display:block}
+.sync.salvando i{background:var(--acc);animation:pulsa 1s infinite}
+.sync.erro{border-color:rgba(255,84,112,.5);color:#ff8ea1}
+.sync.erro i{background:var(--danger)}
+@keyframes pulsa{0%,100%{opacity:1}50%{opacity:.25}}
+@media (prefers-reduced-motion:reduce){.sync.salvando i{animation:none}}
+
+nav.tabs{display:flex;gap:6px;margin:16px 0 14px;flex-wrap:wrap;align-items:center}
+.tab{padding:9px 15px;border-radius:10px;border:1px solid var(--line);background:var(--bg2);
+  color:var(--txt2);cursor:pointer;font-weight:600;font-size:13px;display:flex;gap:8px;align-items:center}
+.tab:hover{border-color:var(--line2);color:var(--txt)}
+.tab.on{background:linear-gradient(180deg,rgba(255,176,32,.18),rgba(255,176,32,.06));
+  border-color:rgba(255,176,32,.5);color:#fff}
+.tab svg{width:15px;height:15px}
+section.view{display:none}
+section.view.on{display:block}
+
+.card{background:linear-gradient(180deg,var(--panel),rgba(16,23,40,.7));border:1px solid var(--line);
+  border-radius:16px;padding:18px}
+.card + .card{margin-top:14px}
+.card h2{font-size:13px;margin:0 0 12px;letter-spacing:1.1px;text-transform:uppercase;color:var(--txt2);
+  display:flex;align-items:center;gap:9px}
+.card h2 svg{width:16px;height:16px;color:var(--acc)}
+
+.ctl{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-bottom:14px}
+label.f{display:flex;flex-direction:column;gap:4px;font-size:10.5px;color:var(--txt3);
+  text-transform:uppercase;letter-spacing:.8px}
+select,input,textarea{background:var(--bg2);border:1px solid var(--line2);color:var(--txt);
+  border-radius:9px;padding:8px 11px;font-family:var(--sans);font-size:13px;outline:none}
+input[type=date],input[type=time],input[type=number]{font-family:var(--mono)}
+select:focus,input:focus,textarea:focus,button:focus-visible{border-color:var(--acc);
+  box-shadow:0 0 0 3px rgba(255,176,32,.18);outline:none}
+button{font-family:var(--sans);cursor:pointer}
+.btn{background:var(--bg2);border:1px solid var(--line2);color:var(--txt);border-radius:9px;
+  padding:9px 14px;font-size:12.5px;font-weight:600;display:inline-flex;gap:7px;align-items:center}
+.btn:hover{border-color:var(--acc);color:#fff}
+.btn svg{width:14px;height:14px}
+.btn.pri{background:linear-gradient(180deg,#ffbe3d,#f09000);color:#20160a;border-color:#ffca63}
+.btn.dgr{border-color:rgba(255,84,112,.5);color:#ff8ea1}
+.btn.on{background:linear-gradient(180deg,rgba(56,214,196,.22),rgba(56,214,196,.07));
+  border-color:rgba(56,214,196,.6);color:#bff6ee}
+
+.plantwrap{display:grid;grid-template-columns:minmax(0,1fr) 258px;gap:16px}
+@media(max-width:960px){.plantwrap{grid-template-columns:1fr}}
+svg.planta{width:100%;height:auto;display:block;background:var(--bg2);
+  border:1px solid var(--line);border-radius:14px;touch-action:none}
+.zone{cursor:pointer}
+.zone:hover .zbody{filter:brightness(1.35)}
+body.ajuste .zone{cursor:grab}
+body.ajuste .zone:active{cursor:grabbing}
+.zbloco{font-family:var(--sans);font-size:20px;font-weight:700;fill:#fff;pointer-events:none;letter-spacing:.5px}
+.zetapa{font-family:var(--sans);font-size:14px;font-weight:600;pointer-events:none;letter-spacing:1.4px}
+.zcod{font-family:var(--mono);font-size:11px;fill:rgba(255,255,255,.5);pointer-events:none}
+.zvol{font-family:var(--mono);font-size:11.5px;fill:rgba(255,255,255,.7);pointer-events:none}
+.zdate{font-family:var(--mono);font-size:12.5px;fill:#fff;pointer-events:none}
+.zage{font-family:var(--mono);font-size:11.5px;pointer-events:none}
+
+.legend{display:flex;flex-direction:column;gap:8px}
+.lg{display:flex;gap:9px;align-items:flex-start;font-size:12px;color:var(--txt2);
+  background:var(--bg2);border:1px solid var(--line);border-radius:10px;padding:8px 10px}
+.dot{width:12px;height:12px;border-radius:4px;flex:none;margin-top:2px}
+.lg b{color:var(--txt);display:block;font-size:12.5px}
+.lg small{color:var(--txt3);font-size:10.5px}
+
+.calib{margin-top:14px;border:1px dashed var(--line2);border-radius:12px;padding:14px;display:none}
+.calib.on{display:block}
+.calib .row{display:flex;gap:16px;flex-wrap:wrap;align-items:center;margin-top:10px}
+.calib label{font-size:10.5px;color:var(--txt3);text-transform:uppercase;letter-spacing:.8px;
+  display:flex;flex-direction:column;gap:5px}
+input[type=range]{width:170px;accent-color:var(--acc);background:none;border:none;padding:0}
+.dz{border:1.5px dashed var(--line2);border-radius:12px;padding:20px;text-align:center;color:var(--txt3);
+  font-size:12.5px;background:rgba(140,170,255,.03)}
+.dz.hot{border-color:var(--acc);color:var(--acc);background:rgba(255,176,32,.07)}
+
+.tbl{width:100%;border-collapse:collapse;font-size:12.5px}
+.tbl th{position:sticky;top:0;background:var(--panel2);text-align:left;padding:9px 10px;
+  font-size:10.5px;letter-spacing:.8px;text-transform:uppercase;color:var(--txt3);
+  border-bottom:1px solid var(--line2);white-space:nowrap}
+.tbl td{padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:middle}
+.tbl tr:hover td{background:rgba(140,170,255,.05)}
+.tbl td.m,.tbl th.m{font-family:var(--mono)}
+.pill{display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:99px;
+  font-size:10.5px;font-weight:600;white-space:nowrap}
+.tag{font-family:var(--mono);font-size:11px;padding:2px 7px;border-radius:6px;
+  background:var(--bg2);border:1px solid var(--line2)}
+.scroll{overflow:auto;max-height:62vh;border:1px solid var(--line);border-radius:12px}
+
+.elev{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}
+.blk{background:var(--bg2);border:1px solid var(--line);border-radius:14px;padding:14px}
+.blk h3{margin:0 0 4px;font-size:13px}
+.blk p{margin:0 0 12px;font-size:11px;color:var(--txt3)}
+.egrid{display:grid;gap:5px}
+.erow{display:grid;gap:5px;align-items:center}
+.ecell{height:34px;border-radius:7px;border:1px solid var(--line2);display:grid;place-items:center;
+  font-family:var(--mono);font-size:10.5px;color:#0b1020;font-weight:600;cursor:pointer}
+.ecell.empty{background:rgba(74,86,116,.18);color:var(--txt3);border-style:dashed}
+.elab{font-family:var(--mono);font-size:10.5px;color:var(--txt3);text-align:right;padding-right:4px}
+.ehead{font-family:var(--mono);font-size:10.5px;color:var(--txt2);text-align:center}
+
+.ag{display:flex;gap:12px;align-items:center;padding:11px 13px;border:1px solid var(--line);
+  border-radius:11px;background:var(--bg2);margin-bottom:8px}
+.ag .d{font-family:var(--mono);font-size:11px;color:var(--txt3);min-width:96px}
+.ag .t{flex:1;font-size:13px}
+.ag .t b{color:#fff}
+.bar{height:7px;border-radius:99px;background:rgba(140,170,255,.12);overflow:hidden}
+.bar i{display:block;height:100%;border-radius:99px;background:linear-gradient(90deg,var(--acc),var(--acc2))}
+
+.ov{position:fixed;inset:0;background:rgba(5,8,16,.76);backdrop-filter:blur(5px);
+  display:none;align-items:flex-start;justify-content:center;padding:26px 14px;z-index:60;overflow:auto}
+.ov.on{display:flex}
+.modal{width:100%;max-width:840px;background:linear-gradient(180deg,var(--panel),var(--bg2));
+  border:1px solid var(--line2);border-radius:18px;padding:20px;
+  box-shadow:0 40px 90px -30px rgba(0,0,0,.85)}
+.mhead{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:16px}
+.mhead h3{margin:0;font-size:20px}
+.mhead p{margin:3px 0 0;font-size:12px;color:var(--txt2);font-family:var(--mono)}
+.grid{display:grid;gap:11px;grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
+.grid label.f input,.grid label.f select{width:100%}
+.mile{margin-top:16px;border-top:1px dashed var(--line2);padding-top:14px}
+.mrow{display:grid;grid-template-columns:26px 1fr auto auto;gap:10px;align-items:center;
+  padding:8px 10px;border-radius:10px;background:var(--bg2);border:1px solid var(--line);margin-bottom:7px}
+.mrow .ic{width:22px;height:22px;border-radius:7px;display:grid;place-items:center}
+.mrow .ic svg{width:13px;height:13px}
+.mrow .nm{font-size:12.5px}
+.mrow .nm small{display:block;color:var(--txt3);font-size:10.5px}
+.mrow .dt{font-family:var(--mono);font-size:12px}
+.mrow .st{font-family:var(--mono);font-size:10.5px;padding:2px 8px;border-radius:99px}
+.warn{margin-top:12px;border:1px solid rgba(255,84,112,.4);background:rgba(255,84,112,.10);
+  color:#ffa7b6;border-radius:11px;padding:10px 12px;font-size:12px;display:flex;gap:9px}
+.warn svg{width:16px;height:16px;flex:none;margin-top:1px}
+.ok{border-color:rgba(61,220,132,.35);background:rgba(61,220,132,.09);color:#9af0c0}
+.foot{display:flex;justify-content:space-between;gap:10px;margin-top:18px;flex-wrap:wrap}
+.notes{width:100%;min-height:62px;resize:vertical}
+.ref{font-size:11px;color:var(--txt3);margin-top:10px;line-height:1.6}
+.ref b{color:var(--txt2)}
+
+/* ---------------- modo TV ---------------- */
+body.tv{padding:0;overflow:hidden}
+body.tv .wrap{max-width:none;padding:16px 20px;height:100vh;display:flex;flex-direction:column;gap:12px}
+body.tv nav.tabs,body.tv .ctl,body.tv .calib,body.tv .ref{display:none!important}
+body.tv header.top{flex:none}
+body.tv h1{font-size:26px}
+body.tv .kpi b{font-size:26px}
+body.tv .kpi span{font-size:12px}
+body.tv section.view{display:none!important}
+body.tv #v-mapa{display:block!important;flex:1;min-height:0}
+body.tv #v-mapa .card{height:100%;display:flex;flex-direction:column}
+body.tv .plantwrap{flex:1;min-height:0;grid-template-columns:minmax(0,1fr) 340px}
+body.tv svg.planta{height:100%;max-height:calc(100vh - 210px)}
+body.tv .legend{overflow:auto}
+body.tv .btnTv{display:inline-flex!important}
+.btnTv{position:fixed;right:14px;bottom:14px;z-index:70;opacity:.25}
+.btnTv:hover{opacity:1}
+
+@media print{
+  body{background:#fff;color:#000}
+  nav.tabs,.btn,.ctl,.calib,.btnTv{display:none!important}
+  section.view{display:block!important}
+  .card{break-inside:avoid;border-color:#ccc;background:#fff;box-shadow:none}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="top">
+  <div class="brand">
+    <div class="mk">
+      <svg viewBox="0 0 24 24" fill="none" stroke="#ffb020" stroke-width="1.7" width="24" height="24">
+        <path d="M3 7l9-4 9 4-9 4-9-4z"/><path d="M3 12l9 4 9-4"/><path d="M3 17l9 4 9-4"/>
+      </svg>
+    </div>
+    <div>
+      <h1>Painel de Concretagem — Parede de Concreto</h1>
+      <div class="sub" id="subhead">carregando…</div>
+      <div style="margin-top:7px"><span class="sync" id="sync"><i></i><span id="syncTxt">conectando…</span></span></div>
+    </div>
+  </div>
+  <div class="kpis">
+    <div class="kpi"><b id="k1">0</b><span>Concretagens</span></div>
+    <div class="kpi"><b id="k2">0 m³</b><span>Volume executado</span></div>
+    <div class="kpi"><b id="k3">0%</b><span>Avanço estrutura</span></div>
+    <div class="kpi"><b id="k4">0</b><span>Em escoramento</span></div>
+  </div>
+</header>
+
+<nav class="tabs">
+  <button class="tab on" data-v="mapa"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 4L3 6v14l6-2 6 2 6-2V4l-6 2-6-2z"/><path d="M9 4v14M15 6v14"/></svg>Planta / Mapa</button>
+  <button class="tab" data-v="escora"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 5h18M3 12h18M3 19h18"/><path d="M7 5v7M12 5v7M17 5v7"/></svg>Escoramento</button>
+  <button class="tab" data-v="crono"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M3 9h18M8 2v4M16 2v4"/></svg>Cronograma</button>
+  <button class="tab" data-v="agenda"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>Agenda / Alertas</button>
+</nav>
+
+<!-- ================= MAPA ================= -->
+<section class="view on" id="v-mapa">
+  <div class="card">
+    <div class="ctl">
+      <label class="f">Teto<select id="selTeto"></select></label>
+      <label class="f">Data de referência<input type="date" id="hoje"></label>
+      <button class="btn" id="btnPlanta"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 15l5-5 4 4 3-3 6 6"/></svg>Planta de fundo</button>
+      <button class="btn" id="btnAjuste"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 12h14M12 5v14"/></svg>Mover trechos</button>
+      <button class="btn" id="btnTvOn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="6" width="20" height="13" rx="2"/><path d="M8 2l4 4 4-4"/></svg>Modo TV</button>
+      <button class="btn" id="btnPrint"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 9V2h12v7M6 18H4a2 2 0 01-2-2v-5a2 2 0 012-2h16a2 2 0 012 2v5a2 2 0 01-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>Imprimir</button>
+      <button class="btn" id="btnExp"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><path d="M7 10l5 5 5-5M12 15V3"/></svg>Exportar cópia</button>
+    </div>
+
+    <div class="plantwrap">
+      <div><svg class="planta" id="svgPlanta" viewBox="0 0 1000 660" role="img"></svg></div>
+      <div class="legend" id="legend"></div>
+    </div>
+
+    <!-- painel da planta de fundo -->
+    <div class="calib" id="calib">
+      <div class="dz" id="dz">Arraste aqui a planta baixa (PNG, JPG, WEBP ou SVG) ou <b style="color:var(--acc);cursor:pointer" id="pick">escolha o arquivo</b>.<br>
+        <small>Se ela estiver em PDF, exporte primeiro como imagem — o navegador não abre PDF como fundo.</small></div>
+      <input type="file" id="fPlanta" accept="image/*" style="display:none">
+      <div class="row">
+        <label>Opacidade <input type="range" id="cOp" min="5" max="100" value="45"></label>
+        <label>Escala <input type="range" id="cEsc" min="20" max="300" value="100"></label>
+        <label>Horizontal <input type="range" id="cX" min="-600" max="600" value="0"></label>
+        <label>Vertical <input type="range" id="cY" min="-600" max="600" value="0"></label>
+        <label>Rotação <input type="range" id="cRot" min="-180" max="180" value="0"></label>
+        <button class="btn dgr" id="cDel">Remover planta</button>
+      </div>
+      <div class="ref">Ajuste até a planta encaixar sob os trechos. Se preferir mover os trechos em vez da planta, use <b>Mover trechos</b>: arraste cada um e use a roda do mouse sobre ele para redimensionar. Tudo fica salvo no banco.</div>
+    </div>
+
+    <div class="ref">
+      <b>Junta de dilatação de 2 cm</b> entre a ala esquerda e o trecho central. Clique em um trecho para lançar a concretagem.
+    </div>
+  </div>
+</section>
+
+<!-- ================= ESCORAMENTO ================= -->
+<section class="view" id="v-escora">
+  <div class="card">
+    <h2><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 5h18M3 12h18M3 19h18"/><path d="M7 5v7M12 5v7M17 5v7"/></svg>Estado do escoramento por bloco</h2>
+    <div class="elev" id="elev"></div>
+    <div class="ref" style="margin-top:14px">
+      <b>Detalhe do projeto:</b> laje com 0 e 7 dias → 100% escorada · 14 e 21 dias → 50% reescorada ·
+      acima de 28 dias → sem escoras. Retirada de fôrmas: faces laterais 3 dias · faces inferiores com pontaletes
+      bem encunhados 14 dias · faces inferiores sem pontaletes 28 dias. Desforma das paredes com fck 3 MPa (≈8 h).
+    </div>
+  </div>
+</section>
+
+<!-- ================= CRONOGRAMA ================= -->
+<section class="view" id="v-crono">
+  <div class="card">
+    <div class="ctl">
+      <label class="f">Bloco<select id="fBloco"></select></label>
+      <label class="f">Teto<select id="fTeto"></select></label>
+      <label class="f">Situação<select id="fSit"></select></label>
+      <button class="btn" id="btnCsv"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/></svg>Baixar CSV</button>
+    </div>
+    <div class="scroll">
+      <table class="tbl" id="tblCrono">
+        <thead><tr>
+          <th>Trecho</th><th>Teto</th><th class="m">Volume</th><th class="m">Concretagem</th>
+          <th class="m">Idade</th><th>Situação</th><th class="m">Desforma parede</th>
+          <th class="m">Reescoramento 14d</th><th class="m">Retirada 28d</th><th class="m">NF / Caminhões</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ================= AGENDA ================= -->
+<section class="view" id="v-agenda">
+  <div class="card">
+    <h2><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9L1.8 18a2 2 0 001.7 3h17a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z"/></svg>Alertas de escoramento</h2>
+    <div id="alertas"></div>
+  </div>
+  <div class="card">
+    <h2><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>Marcos dos próximos 10 dias</h2>
+    <div id="agenda"></div>
+  </div>
+  <div class="card">
+    <h2><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 3v18h18"/><path d="M7 15l4-4 3 3 5-6"/></svg>Avanço por bloco</h2>
+    <div id="prog"></div>
+  </div>
+</section>
+
+</div>
+
+<button class="btn btnTv" id="btnTvOff" style="display:none">Sair do modo TV</button>
+
+<!-- ================= MODAL ================= -->
+<div class="ov" id="ov">
+  <div class="modal">
+    <div class="mhead">
+      <div><h3 id="mTitle">—</h3><p id="mSub"></p></div>
+      <button class="btn" id="mClose"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>Fechar</button>
+    </div>
+    <div class="grid">
+      <label class="f">Data da concretagem<input type="date" id="fData"></label>
+      <label class="f">Início<input type="time" id="fHora" value="07:00"></label>
+      <label class="f">Volume aplicado (m³)<input type="number" step="0.01" id="fVol"></label>
+      <label class="f">Nº de caminhões<input type="number" id="fCam"></label>
+      <label class="f">Notas fiscais<input type="text" id="fNf" placeholder="ex.: 4512, 4513"></label>
+      <label class="f">fck (MPa)<select id="fFck"><option>40</option><option>45</option><option>35</option><option>30</option></select></label>
+      <label class="f">Slump (cm)<input type="number" step="0.5" id="fSlump" value="22"></label>
+      <label class="f">Responsável<input type="text" id="fResp"></label>
+    </div>
+    <label class="f" style="margin-top:11px">Observações
+      <textarea class="notes" id="fObs" placeholder="Interferências, juntas, correções, ensaios…"></textarea>
+    </label>
+    <div class="mile" id="mile"></div>
+    <div id="mWarn"></div>
+    <div class="foot">
+      <button class="btn dgr" id="mDel"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg>Excluir lançamento</button>
+      <button class="btn pri" id="mSave"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6L9 17l-5-5"/></svg>Salvar concretagem</button>
+    </div>
+  </div>
+</div>
+
+<script type="module" src="/src/main.js"></script>
+</body>
+</html>

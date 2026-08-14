@@ -1,12 +1,12 @@
 /* =====================================================================
    Painel de Concretagem — servidor com PostgreSQL (Supabase/Render)
-   Roda local SEM banco:  node server.js
-   Roda online COM banco:  DATABASE_URL=postgresql://... node server.js
+   Força IPv4 para evitar ENETUNREACH no Render free tier
    ===================================================================== */
 const http = require('http');
 const fs   = require('fs');
 const path = require('path');
 const os   = require('os');
+const url  = require('url');
 
 const PORTA   = Number(process.argv[2]) || 8080;
 const RAIZ    = __dirname;
@@ -27,9 +27,17 @@ let pool = null;
 
 if (MODO_PG) {
   const { Pool } = require('pg');
+  const dbUrl = url.parse(process.env.DATABASE_URL);
+  const auth = (dbUrl.auth || '').split(':');
   pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: { rejectUnauthorized: false }
+    host: dbUrl.hostname,
+    port: dbUrl.port || 5432,
+    user: auth[0],
+    password: auth[1] || '',
+    database: dbUrl.pathname ? dbUrl.pathname.replace(/^\//, '') : '',
+    ssl: { rejectUnauthorized: false },
+    family: 4,
+    connectionTimeoutMillis: 10000
   });
 }
 
