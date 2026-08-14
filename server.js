@@ -1,6 +1,7 @@
 /* =====================================================================
    Painel de Concretagem FAMA — servidor com autenticação, auditoria,
-   funcionários, compressão gzip e cache. Fly.io + volume persistente.
+   serviços/funções/funcionários, compressão gzip e cache.
+   Fly.io + volume persistente.
    ===================================================================== */
 const http = require('http');
 const fs   = require('fs');
@@ -13,6 +14,7 @@ const crypto = require('crypto');
 const PORTA   = Number(process.argv[2]) || 8080;
 const RAIZ    = __dirname;
 const PUBLICO = path.join(RAIZ, 'publico');
+const ASSETS  = path.join(RAIZ, 'assets');
 const DADOS   = path.join(RAIZ, 'dados');
 const BANCO   = path.join(DADOS, 'banco.json');
 const BACKUPS = path.join(DADOS, 'backups');
@@ -24,13 +26,20 @@ for (const d of [DADOS, BACKUPS, PLANTAS, FOTOS]) fs.mkdirSync(d, { recursive: t
 
 /* =====================================================================
    AUTENTICAÇÃO
+   Credenciais vêm de variável de ambiente, com o valor atual como
+   fallback (não quebra instalações existentes que ainda não
+   configuraram PAINEL_LOGIN/PAINEL_SENHA).
    ===================================================================== */
-const CREDENCIAIS = { login: 'Sunset', senha: 'fama' };
+const CREDENCIAIS = {
+  login: process.env.PAINEL_LOGIN || 'Sunset',
+  senha: process.env.PAINEL_SENHA || 'fama'
+};
+const SALT = process.env.PAINEL_SALT || 'fama-salt-2024';
 const SESSOES = new Map(); // token -> {login, criado}
 const SESSAO_DURACAO = 8 * 60 * 60 * 1000; // 8 horas
 
 function hashSenha(senha) {
-  return crypto.createHash('sha256').update(senha + 'fama-salt-2024').digest('hex');
+  return crypto.createHash('sha256').update(senha + SALT).digest('hex');
 }
 
 function novaSessao() {
@@ -65,6 +74,33 @@ function clearAuthCookie(res) {
   res.setHeader('Set-Cookie', `fama_token=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`);
 }
 
+/* ------------------------- proteção contra força bruta ------------------------- */
+const TENTATIVAS_MAX = 8;
+const JANELA_BLOQUEIO = 15 * 60 * 1000; // 15 minutos
+const LOGIN_TENTATIVAS = new Map(); // ip -> {n, primeira, bloqueadoAte}
+
+function ipDe(req) {
+  return req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket?.remoteAddress || 'desconhecido';
+}
+
+function loginBloqueado(ip) {
+  const t = LOGIN_TENTATIVAS.get(ip);
+  if (!t) return false;
+  if (t.bloqueadoAte && Date.now() < t.bloqueadoAte) return true;
+  if (t.bloqueadoAte && Date.now() >= t.bloqueadoAte) { LOGIN_TENTATIVAS.delete(ip); return false; }
+  return false;
+}
+
+function registrarFalhaLogin(ip) {
+  const t = LOGIN_TENTATIVAS.get(ip) || { n: 0, primeira: Date.now() };
+  if (Date.now() - t.primeira > JANELA_BLOQUEIO) { t.n = 0; t.primeira = Date.now(); }
+  t.n++;
+  if (t.n >= TENTATIVAS_MAX) t.bloqueadoAte = Date.now() + JANELA_BLOQUEIO;
+  LOGIN_TENTATIVAS.set(ip, t);
+}
+
+function limparTentativasLogin(ip) { LOGIN_TENTATIVAS.delete(ip); }
+
 /* =====================================================================
    AUDITORIA
    ===================================================================== */
@@ -73,7 +109,7 @@ function auditar(acao, detalhe, req) {
     t: new Date().toISOString(),
     acao,
     detalhe,
-    ip: req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '-'
+    ip: ipDe(req)
   }) + '\n';
   try { fs.appendFileSync(AUDIT, linha); } catch (e) {}
 }
@@ -102,13 +138,95 @@ if (MODO_PG) {
 }
 
 /* ------------------------- banco de dados ------------------------- */
-const VAZIO = { rev: 0, atualizado: null, pours: {}, planta: null, ajustes: {},
-                metas: {}, plano: null, equipes: [], alocacoes: [], funcionarios: [] };
+// schemaV 2 = arquitetura Serviços/Funções/Funcionários/Kanban/Capacetes.
+// Os campos `equipes` / `equipeId` são mantidos por compatibilidade e
+// não são mais lidos pelo front — servem só de histórico/rollback.
+const VAZIO = {
+  rev: 0, atualizado: null, pours: {}, planta: null, ajustes: {},
+  metas: {}, plano: null,
+  equipes: [], alocacoes: [], funcionarios: [],
+  servicos: [], funcoes: [],
+  schemaV: 2
+};
 
 let ESTADO = Object.assign({}, VAZIO);
 
+/* --------- migração equipes → serviços (idempotente, aditiva) --------- */
+const CORES_PADRAO = ['#e91e63', '#3fd0e6', '#5fd67f', '#ffb020', '#8b7cf6', '#38b6ff', '#d98cf5', '#f0846f'];
+const FUNCOES_PADRAO = ['Pedreiro', 'Servente', 'Armador', 'Carpinteiro', 'Encarregado', 'Engenheiro', 'Técnico', 'Mestre de Obras'];
+
+function gerarCodigoServico(nome, i) {
+  const base = (nome || 'SRV')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 3);
+  return (base || 'SRV') + (i + 1);
+}
+
+function migrarServicos(estado) {
+  if (estado && estado.schemaV >= 2) return estado;
+  const novo = Object.assign({}, VAZIO, estado);
+
+  // equipes -> servicos (id preservado; não apaga `equipes`, só deixa de ser a fonte usada)
+  if (!Array.isArray(novo.servicos) || !novo.servicos.length) {
+    novo.servicos = (novo.equipes || []).map((e, i) => ({
+      id: e.id,
+      nome: e.nome || ('Serviço ' + (i + 1)),
+      codigo: gerarCodigoServico(e.nome, i),
+      descricao: '',
+      cor: e.cor || CORES_PADRAO[i % CORES_PADRAO.length],
+      ativo: true
+    }));
+  }
+
+  // alocacoes: adiciona servicoId ao lado de equipeId (nada é removido)
+  novo.alocacoes = (novo.alocacoes || []).map(a =>
+    a.servicoId ? a : Object.assign({}, a, { servicoId: a.equipeId || '' })
+  );
+
+  // funções: junta a lista fixa antiga do <select> com o que já existir nos funcionários
+  const nomesFuncao = new Set(FUNCOES_PADRAO);
+  (novo.funcionarios || []).forEach(f => { if (f.funcao) nomesFuncao.add(f.funcao); });
+  if (!Array.isArray(novo.funcoes) || !novo.funcoes.length) {
+    novo.funcoes = [...nomesFuncao].map((nome, i) => ({
+      id: 'fn' + Date.now().toString(36) + i,
+      nome, ativa: true
+    }));
+  }
+
+  // funcionarios: adiciona servicoId ao lado de equipeId (nada é removido)
+  novo.funcionarios = (novo.funcionarios || []).map(f =>
+    f.servicoId !== undefined ? f : Object.assign({}, f, { servicoId: f.equipeId || '' })
+  );
+
+  novo.schemaV = 2;
+  return novo;
+}
+
+function seedPlantaPadrao(estado) {
+  // Instalação nova: se existir um asset versionado, copia pra dados/plantas
+  // e referencia no estado, pra não precisar subir a planta manualmente de novo.
+  try {
+    const origem = path.join(ASSETS, 'planta-padrao.png');
+    const destino = path.join(PLANTAS, 'planta-padrao.png');
+    if (!estado.planta && fs.existsSync(origem) && !fs.existsSync(destino)) {
+      fs.copyFileSync(origem, destino);
+      const bytes = fs.statSync(destino).size;
+      estado.planta = { arquivo: 'planta-padrao.png', tipo: 'image/png', bytes };
+    }
+  } catch (e) { /* não é crítico — segue sem planta padrão */ }
+  return estado;
+}
+
 function lerLocal() {
-  try { const j = JSON.parse(fs.readFileSync(BANCO, 'utf8')); return Object.assign({}, VAZIO, j); }
+  try {
+    const j = JSON.parse(fs.readFileSync(BANCO, 'utf8'));
+    const mesclado = Object.assign({}, VAZIO, j);
+    // VAZIO já vem com schemaV:2 (formato-alvo pra instalação nova). Um banco.json
+    // existente sem esse campo não pode "herdar" o 2 do merge, senão a migração
+    // abaixo nunca dispara. Preserva o valor real gravado no disco (ou 1, se ausente).
+    mesclado.schemaV = j.schemaV || 1;
+    return mesclado;
+  }
   catch (e) { return Object.assign({}, VAZIO); }
 }
 
@@ -121,9 +239,9 @@ function gravarLocal(estado) {
 }
 
 let ultimoBackup = 0;
-function backupLocal(estado) {
+function backupLocal(estado, forcar) {
   const agora = Date.now();
-  if (agora - ultimoBackup < 10 * 60 * 1000) return;
+  if (!forcar && agora - ultimoBackup < 10 * 60 * 1000) return;
   ultimoBackup = agora;
   const d = new Date();
   const nome = 'banco-' + d.toISOString().slice(0, 16).replace(/[:T]/g, '') + '.json';
@@ -147,9 +265,16 @@ async function initPG() {
       plano JSONB,
       equipes JSONB DEFAULT '[]',
       alocacoes JSONB DEFAULT '[]',
-      funcionarios JSONB DEFAULT '[]'
+      funcionarios JSONB DEFAULT '[]',
+      servicos JSONB DEFAULT '[]',
+      funcoes JSONB DEFAULT '[]',
+      schema_v INTEGER DEFAULT 1
     )
   `);
+  // instalações antigas: garante as colunas novas sem perder dados existentes
+  await pool.query(`ALTER TABLE painel_estado ADD COLUMN IF NOT EXISTS servicos JSONB DEFAULT '[]'`);
+  await pool.query(`ALTER TABLE painel_estado ADD COLUMN IF NOT EXISTS funcoes JSONB DEFAULT '[]'`);
+  await pool.query(`ALTER TABLE painel_estado ADD COLUMN IF NOT EXISTS schema_v INTEGER DEFAULT 1`);
   await pool.query(`INSERT INTO painel_estado (id) VALUES (1) ON CONFLICT (id) DO NOTHING`);
 }
 
@@ -161,25 +286,38 @@ async function lerPG() {
     rev: row.rev || 0, atualizado: row.atualizado,
     pours: row.pours || {}, planta: row.planta, ajustes: row.ajustes || {},
     metas: row.metas || {}, plano: row.plano, equipes: row.equipes || [],
-    alocacoes: row.alocacoes || [], funcionarios: row.funcionarios || []
+    alocacoes: row.alocacoes || [], funcionarios: row.funcionarios || [],
+    servicos: row.servicos || [], funcoes: row.funcoes || [],
+    schemaV: row.schema_v || 1
   };
 }
 
 async function gravarPG(estado) {
-  await pool.query(`UPDATE painel_estado SET rev=$1, atualizado=$2, pours=$3, planta=$4, ajustes=$5, metas=$6, plano=$7, equipes=$8, alocacoes=$9, funcionarios=$10 WHERE id=1`, [
+  await pool.query(`UPDATE painel_estado SET rev=$1, atualizado=$2, pours=$3, planta=$4, ajustes=$5, metas=$6, plano=$7, equipes=$8, alocacoes=$9, funcionarios=$10, servicos=$11, funcoes=$12, schema_v=$13 WHERE id=1`, [
     estado.rev, estado.atualizado, JSON.stringify(estado.pours),
     estado.planta ? JSON.stringify(estado.planta) : null,
     JSON.stringify(estado.ajustes), JSON.stringify(estado.metas),
     estado.plano ? JSON.stringify(estado.plano) : null,
     JSON.stringify(estado.equipes), JSON.stringify(estado.alocacoes),
-    JSON.stringify(estado.funcionarios || [])
+    JSON.stringify(estado.funcionarios || []),
+    JSON.stringify(estado.servicos || []),
+    JSON.stringify(estado.funcoes || []),
+    estado.schemaV || 2
   ]);
   return estado;
 }
 
 async function carregar() {
-  if (MODO_PG) ESTADO = await lerPG();
-  else { ESTADO = lerLocal(); if (!fs.existsSync(BANCO)) gravarLocal(ESTADO); }
+  const eraNova = !MODO_PG && !fs.existsSync(BANCO);
+  let estado = MODO_PG ? await lerPG() : lerLocal();
+
+  const precisaMigrar = !estado.schemaV || estado.schemaV < 2;
+  if (precisaMigrar && !MODO_PG) backupLocal(estado, true); // snapshot de segurança pré-migração
+  estado = migrarServicos(estado);
+  if (eraNova) estado = seedPlantaPadrao(estado);
+
+  if (precisaMigrar || eraNova) await salvar(estado);
+  else ESTADO = estado;
 }
 
 async function salvar(estado) {
@@ -241,13 +379,20 @@ const servidor = http.createServer(async (req, res) => {
   try {
     /* --- LOGIN --- */
     if (rota === '/api/login' && req.method === 'POST') {
+      const ip = ipDe(req);
+      if (loginBloqueado(ip)) {
+        auditar('login', 'bloqueado por tentativas — ' + ip, req);
+        return json(res, 429, { ok: false, erro: 'Muitas tentativas. Aguarde alguns minutos e tente de novo.' });
+      }
       const body = JSON.parse((await corpo(req)).toString('utf8'));
       if (body.login === CREDENCIAIS.login && hashSenha(body.senha) === hashSenha(CREDENCIAIS.senha)) {
+        limparTentativasLogin(ip);
         const token = novaSessao();
         setAuthCookie(res, token);
         auditar('login', 'sucesso', req);
         return json(res, 200, { ok: true, token });
       }
+      registrarFalhaLogin(ip);
       auditar('login', 'falha: ' + body.login, req);
       return json(res, 401, { ok: false, erro: 'Credenciais inválidas' });
     }
@@ -272,22 +417,10 @@ const servidor = http.createServer(async (req, res) => {
       return json(res, 200, { ok: true, logs: lerAuditoria(limite) });
     }
 
-    /* --- FUNCIONÁRIOS --- */
-    if (rota === '/api/funcionarios' && req.method === 'GET') {
-      if (!authOk(req)) return json(res, 401, { erro: 'Não autenticado' });
-      return json(res, 200, { ok: true, funcionarios: ESTADO.funcionarios || [] });
-    }
-
-    if (rota === '/api/funcionarios' && req.method === 'PUT') {
-      if (!authOk(req)) return json(res, 401, { erro: 'Não autenticado' });
-      const body = JSON.parse((await corpo(req)).toString('utf8'));
-      const estado = { ...ESTADO, funcionarios: body.funcionarios || [], rev: (ESTADO.rev || 0) + 1, atualizado: new Date().toISOString() };
-      await salvar(estado);
-      auditar('funcionarios', 'atualizado ' + (body.funcionarios || []).length + ' registros', req);
-      return json(res, 200, { ok: true, rev: estado.rev });
-    }
-
-    /* --- ESTADO (leitura pública, escrita protegida) --- */
+    /* --- ESTADO (leitura pública, escrita protegida) ---
+       Serviços, funções, funcionários, kanban e capacetes viajam todos
+       dentro do mesmo objeto de estado — uma única rota de escrita,
+       para não haver dois caminhos divergentes salvando o mesmo dado. */
     if (rota === '/api/estado' && req.method === 'GET') {
       return json(res, 200, ESTADO);
     }
@@ -300,8 +433,12 @@ const servidor = http.createServer(async (req, res) => {
         pours: novo.pours || {}, planta: novo.planta !== undefined ? novo.planta : ESTADO.planta,
         ajustes: novo.ajustes || {}, metas: novo.metas || {},
         plano: novo.plano !== undefined ? novo.plano : ESTADO.plano,
-        equipes: novo.equipes || [], alocacoes: novo.alocacoes || [],
-        funcionarios: novo.funcionarios !== undefined ? novo.funcionarios : (ESTADO.funcionarios || [])
+        equipes: novo.equipes !== undefined ? novo.equipes : (ESTADO.equipes || []),
+        alocacoes: novo.alocacoes || [],
+        funcionarios: novo.funcionarios !== undefined ? novo.funcionarios : (ESTADO.funcionarios || []),
+        servicos: novo.servicos !== undefined ? novo.servicos : (ESTADO.servicos || []),
+        funcoes: novo.funcoes !== undefined ? novo.funcoes : (ESTADO.funcoes || []),
+        schemaV: 2
       };
       await salvar(estado);
       auditar('estado', 'salvo rev ' + estado.rev, req);
@@ -374,7 +511,6 @@ const servidor = http.createServer(async (req, res) => {
       const ext = path.extname(arquivo).toLowerCase();
       const tipo = MIME[ext] || 'text/plain; charset=utf-8';
       const buf = fs.readFileSync(arquivo);
-      const cache = (ext === '.html' || ext === '.js') ? 'public, max-age=60' : 'public, max-age=3600';
       gzipSePossivel(res, buf, tipo);
       return;
     }
@@ -411,6 +547,7 @@ async function iniciar() {
     console.log(linha);
     if (!MODO_PG) { console.log('  Banco:    ' + BANCO); console.log('  Backups:  ' + BACKUPS); }
     console.log('  Registros salvos: ' + Object.keys(ESTADO.pours).length + '  ·  revisão ' + ESTADO.rev);
+    console.log('  Serviços:         ' + (ESTADO.servicos || []).length);
     console.log('  Funcionários:     ' + (ESTADO.funcionarios || []).length);
     console.log(linha);
     console.log('  Para parar o servidor: Ctrl + C\n');

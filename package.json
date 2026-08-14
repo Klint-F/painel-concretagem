@@ -4,7 +4,8 @@
   "description": "Painel de gestao a vista de concretagem",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "build": "echo \"sem build necessario — servidor Node puro\""
   },
   "dependencies": {
     "pg": "^8.12.0"
